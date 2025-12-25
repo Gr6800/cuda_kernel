@@ -36,12 +36,17 @@ __global__ void rmsnorm_kernel(
     // 计算下标分配数据 load
     int offset_start_s = blockIdx.x;
     int offset_start_h = threadIdx.x;
-    int offset = offset_start_s * stride_s + offset_start_h;
-    float x = input[offset];
-
-    // 计算+=x^2
+    
+    float x;
     extern __shared__ float s_variance[];   // 在kernel launch时指定了shared mem的大小，此处命名
-    float variance = x*x;
+    float variance = 0.0;
+    // 计算+=x^2: 不论有多少数据都处理到最多1024个thread中
+    for(offset_start_h = threadIdx.x; offset_start_h < hidden_dim; offset_start_h += blockDim.x){
+        int offset = offset_start_s * stride_s + offset_start_h;
+        x = input[offset];
+        variance += x*x;
+    }
+    // __syncthreads();    // 每个线程处理的数据可能不一致，这里需要做__syncthreads吗？TODO 目前不同步，在hiddendim>1024下计算正常
     // 1 在warp内归约
     variance = reduce_in_warp(variance);
     // 2 将lane0的值写到shared memory
@@ -52,8 +57,8 @@ __global__ void rmsnorm_kernel(
     }
     __syncthreads();
     // 3 在shared memory上归约
-    if(warp_id == 0) {  // TODO? 默认warp个数小于32
-        int num_warp = (hidden_dim + 32 - 1) / 32;
+    if(warp_id == 0) {  // num_thread最大为1024，所以warp个数最大为32(32=1024/32)
+        int num_warp = min(1024, (hidden_dim + 32 - 1) / 32);
         float sum = (lane_id < num_warp)? s_variance[lane_id] : 0;
         s_variance[0] = reduce_in_warp(sum);    // 将结果存在s_variance[0]中
     }
@@ -61,9 +66,14 @@ __global__ void rmsnorm_kernel(
 
     __shared__ float s_var;
     s_var = s_variance[0];
+    // printf("s_var: %f\n", s_var);
 
-    // 计算rmsnorm,store
-    output[offset] = x * weight[offset_start_h] * rsqrt(s_var/hidden_dim + eps);
+    // 计算rmsnorm, store
+    for(offset_start_h = threadIdx.x; offset_start_h < hidden_dim; offset_start_h += blockDim.x){
+        int offset = offset_start_s * stride_s + offset_start_h;
+        x = input[offset]; // TODO 当hidden_dim<1024时，只用load一次x
+        output[offset] = x * weight[offset_start_h%hidden_dim] * rsqrt(s_var/hidden_dim + eps);
+    }
     // printf("offset: %d, weight: %f\n", offset, weight[offset_start_h]);
 
 }
@@ -94,7 +104,7 @@ void rmsnorm(
     // 划分数据
     dim3 grid(seq_len); //按行划分,每个block处理一行,行与行之间没有数据交互
     dim3 block(std::min(hidden_dim, 1024)); // 每个thread处理一个元素
-    int num_warp = (hidden_dim + 32 - 1) / 32;
+    int num_warp = std::min(32, (hidden_dim + 32 - 1) / 32);
     
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     using input_dtype = float;  // TODO 暂时写成float
@@ -106,5 +116,4 @@ void rmsnorm(
         seq_len, hidden_dim,
         stride_s, stride_h
     );
-    // rmsnorm_kernel<<<1, 1, 0, stream>>>(output, input_view, weight, ); // gridDim, blockDim, sharedMemSize, stream
 }

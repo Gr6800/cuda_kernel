@@ -3,4 +3,5 @@ build/
 .vscode/
 *.log
 __pycache__/
+*.ncu-rep
 .codelink
