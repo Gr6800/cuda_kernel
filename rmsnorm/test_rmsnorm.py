@@ -7,7 +7,9 @@ import cuda_ops
 from utils.utils import benchmark_kernel
 
 torch.manual_seed(0)
-INPUT_ARGS = [[4096*24, 16*2**i] for i in range(10)] # 16, ..., 8192
+# INPUT_ARGS = [[4096*24, 16*2**i] for i in range(10)] # 16, ..., 8192
+# INPUT_ARGS = [[4, 1024]]
+INPUT_ARGS = [[4096*24, 16*2**i] for i in range(11)] # 16, ..., 8192
 
 def rmsnorm_ref(hidden_states: torch.Tensor, weight: torch.Tensor, variance_epsilon: float):
     input_dtype = hidden_states.dtype
@@ -17,11 +19,12 @@ def rmsnorm_ref(hidden_states: torch.Tensor, weight: torch.Tensor, variance_epsi
     return weight * hidden_states.to(input_dtype)
 
 def test_rmsnorm():
-    B = 4096*24 # batch
-    H = 128 # hidden_dim
+    B = 2 # batch
+    H = 1024 # hidden_dim
     input = torch.randn(B, H, device="cuda").to(torch.float32)
     # input = torch.ones(B, H, device="cuda").to(torch.float32)
     # input = torch.arange(H, device="cuda").to(torch.float32).repeat(B, 1)
+    # input = torch.arange(B*H+1, device="cuda").to(torch.float32)[1:].reshape(B,H)   # 切片后导致非对齐
     output = torch.empty_like(input)
     # weight = torch.ones(H, device="cuda").to(torch.float32) * 0.5
     # weight = torch.arange(0, H, device="cuda").to(torch.float32)
@@ -35,13 +38,13 @@ def test_rmsnorm():
 def test_rmsnorm_accuracy():
     for INPUT_ARG in INPUT_ARGS:
         B, H = INPUT_ARG # batch, hidden_dim
-        input = torch.randn(B, H, device="cuda").to(torch.float32)
+        # input = torch.randn(B, H, device="cuda").to(torch.float32)
         # input = torch.ones(B, H, device="cuda").to(torch.float32)
-        # input = torch.arange(H, device="cuda").to(torch.float32).repeat(B, 1)
+        input = torch.arange(H, device="cuda").to(torch.float32).repeat(B, 1)
         output = torch.empty_like(input)
-        # weight = torch.ones(H, device="cuda").to(torch.float32) * 0.5
+        weight = torch.ones(H, device="cuda").to(torch.float32) * 0.5
         # weight = torch.arange(0, H, device="cuda").to(torch.float32)
-        weight = torch.randn(H, device="cuda").to(torch.float32)
+        # weight = torch.randn(H, device="cuda").to(torch.float32)
         eps = 1e-6
 
         # print(input)
@@ -69,6 +72,6 @@ def test_rmsnorm_performance():
         print(f"input_args[B={B},H={H}], duration_cuda: {duration_cuda * 1000} ms")
 
 if __name__ == "__main__":
-    # test_rmsnorm()
-    test_rmsnorm_accuracy()
+    test_rmsnorm()
+    # test_rmsnorm_accuracy()
     # test_rmsnorm_performance()
