@@ -1,6 +1,7 @@
 import torch
-
+import os
 import sys
+project_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append("/nfsmnt/guanrui012/github/hopper/cuda_kernel")
 import cuda_ops
 
@@ -9,7 +10,7 @@ from utils.utils import benchmark_kernel
 torch.manual_seed(0)
 # INPUT_ARGS = [[4096*24, 16*2**i] for i in range(10)] # 16, ..., 8192
 # INPUT_ARGS = [[4, 1024]]
-INPUT_ARGS = [[4096*24, 16*2**i] for i in range(11)] # 16, ..., 8192
+INPUT_ARGS = [[4096*24, 16*2**i] for i in range(8)] # 16, ..., 8192
 
 def rmsnorm_ref(hidden_states: torch.Tensor, weight: torch.Tensor, variance_epsilon: float):
     input_dtype = hidden_states.dtype
@@ -33,18 +34,19 @@ def test_rmsnorm():
 
     # print(input)
     cuda_ops.rmsnorm(output, input, weight, eps)
+    cuda_ops.rmsnorm(output, input, weight, eps)
     # print(f"cuda_output: {output}")
 
 def test_rmsnorm_accuracy():
     for INPUT_ARG in INPUT_ARGS:
         B, H = INPUT_ARG # batch, hidden_dim
-        # input = torch.randn(B, H, device="cuda").to(torch.float32)
+        input = torch.randn(B, H, device="cuda").to(torch.float32)
         # input = torch.ones(B, H, device="cuda").to(torch.float32)
-        input = torch.arange(H, device="cuda").to(torch.float32).repeat(B, 1)
+        # input = torch.arange(H, device="cuda").to(torch.float32).repeat(B, 1)
         output = torch.empty_like(input)
-        weight = torch.ones(H, device="cuda").to(torch.float32) * 0.5
+        weight = torch.randn(H, device="cuda").to(torch.float32)
+        # weight = torch.ones(H, device="cuda").to(torch.float32) * 0.5
         # weight = torch.arange(0, H, device="cuda").to(torch.float32)
-        # weight = torch.randn(H, device="cuda").to(torch.float32)
         eps = 1e-6
 
         # print(input)
@@ -72,6 +74,6 @@ def test_rmsnorm_performance():
         print(f"input_args[B={B},H={H}], duration_cuda: {duration_cuda * 1000} ms")
 
 if __name__ == "__main__":
-    test_rmsnorm()
+    # test_rmsnorm()
     # test_rmsnorm_accuracy()
-    # test_rmsnorm_performance()
+    test_rmsnorm_performance()

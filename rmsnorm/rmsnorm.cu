@@ -9,7 +9,7 @@ struct __align__(size*sizeof(scalar_t)) vec_n_buf{   // __align要求1,2,4,8,16B
 };
 
 template <int vec_size, typename scalar_t, typename VecOp>   // 类型模板参数可以由编译器推导，非类型的模型参数不能被推导
-__device__ inline void vec_reduce(
+__device__ inline void vec_xx(
         const scalar_t* input, // 每行的全局下标的地址
         VecOp vec_op){
     // 每个thread处理vec个元素，目前每个thread仅处理1轮 TODO
@@ -17,11 +17,9 @@ __device__ inline void vec_reduce(
     // 1 确认对齐
     static_assert(vec_size > 0 && (vec_size & (vec_size - 1)) == 0, 
                   "vec_size must be a power of 2");
-    uintptr_t addr_input = reinterpret_cast<uintptr_t>(input);
-    constexpr int vec_width = vec_size * sizeof(scalar_t); // 需要在编译期确认，所以需要定义为编译期常量。在函数外保证了input的数据类型与vec中的数据类型相同
-    // static_assert((addr_input & (vec_width - 1)) == 0,  // 对齐指的是地址是数据类型的整数倍
-    //                 "");  // 地址不与vec对齐会发生什么？ TODO
-    bool is_align = ((addr_input & (vec_width - 1)) == 0);
+    // uintptr_t addr_input = reinterpret_cast<uintptr_t>(input);
+    // constexpr int vec_width = vec_size * sizeof(scalar_t); // 需要在编译期确认，因为scalar_t在编译期确定，所以需要定义为编译期常量。在函数外保证了input的数据类型与vec中的数据类型相同
+    // bool is_align = ((addr_input & (vec_width - 1)) == 0);
     // printf("is_align: %d\n", is_align);
 
     // 2 为每个线程分配数据
@@ -32,6 +30,29 @@ __device__ inline void vec_reduce(
 
     // 3 应用vec_op
     vec_op(data); // 数据类型转换后，可以通过下标来取数，一次取size个
+}
+
+template <int vec_size, typename scalar_t, typename VecRmsnormOp>
+__device__ void vec_rmsnorm(
+    scalar_t* output,
+    const scalar_t* input,
+    const scalar_t* weight,
+    float s_var,
+    const int hidden_dim,
+    const float eps,
+    VecRmsnormOp vec_rmsnorm_op
+){
+    // 按一行数据一个block负责，然后重新分配给每个thread
+    using vec_n = vec_n_buf<scalar_t, vec_size>;
+    vec_n* vec_output = reinterpret_cast<vec_n*>(output); // 将当前block负责的所有元素都进行转换
+    const vec_n* vec_input = reinterpret_cast<const vec_n*>(input);
+    const vec_n* vec_weight = reinterpret_cast<const vec_n*>(weight);
+    int offset_start_h = threadIdx.x;
+    vec_rmsnorm_op(
+        vec_output[offset_start_h], 
+        vec_input[offset_start_h], 
+        vec_weight[offset_start_h], 
+        s_var, hidden_dim, eps);
 }
 
 __device__ float reduce_in_warp(float val) {
@@ -63,21 +84,15 @@ __global__ void rmsnorm_kernel(
     const int stride_s, 
     const int stride_h
 ) {
-    // printf("there is rmsnorm kernel\n");
-    // 计算下标分配数据 load
+    // step 1: 计算下标分配数据 load
     int offset_start_s = blockIdx.x;
     int offset_start_h = threadIdx.x;
     
-    float x;
     extern __shared__ float s_variance[];   // 在kernel launch时指定了shared mem的大小，此处命名
     float variance = 0.0;
-    // 计算+=x^2: 使用vector方式，目前仅处理有限hidden_dim TODO
-    // for(offset_start_h = threadIdx.x; offset_start_h < hidden_dim; offset_start_h += blockDim.x){
-    //     int offset = offset_start_s * stride_s + offset_start_h;
-    //     x = input[offset];
-    //     variance += x*x;
-    // }
-    // // __syncthreads();    // 每个线程处理的数据可能不一致，这里需要做__syncthreads吗？TODO 目前不同步，在hiddendim>1024下计算正常
+    
+    // step 2: 计算+=x*x，并归约
+    // step 2.1: 向量化访存，先归约至每个线程的variance中
     auto vec_op = [&variance](const vec_n_buf<scalar_t, vec_size> &vec){
 #pragma unroll // 循环展开 
         for(int i = 0; i < vec_size; i++){
@@ -85,9 +100,10 @@ __global__ void rmsnorm_kernel(
             variance += x * x;
         }
     };
-    vec_reduce<vec_size>(input+offset_start_s*stride_s, vec_op);
+    vec_xx<vec_size>(input+offset_start_s*stride_s, vec_op);
     // printf("offset: %d, variance: %f\n", offset_start_s*stride_s+offset_start_h, variance);
     
+    // step 2.2: 归约
     // 1 在warp内归约
     variance = reduce_in_warp(variance);
     // 2 将lane0的值写到shared memory
@@ -99,7 +115,7 @@ __global__ void rmsnorm_kernel(
     __syncthreads();
     // 3 在shared memory上归约
     if(warp_id == 0) {  // num_thread最大为1024，所以warp个数最大为32(32=1024/32)
-        int num_warp = min(1024, (hidden_dim + 32 - 1) / 32);
+        int num_warp = min(32, (int(hidden_dim/vec_size) + 32 - 1) / 32);
         float sum = (lane_id < num_warp)? s_variance[lane_id] : 0;
         s_variance[0] = reduce_in_warp(sum);    // 将结果存在s_variance[0]中
     }
@@ -109,40 +125,28 @@ __global__ void rmsnorm_kernel(
     s_var = s_variance[0];
     // printf("s_var: %f\n", s_var);
 
-    // 计算rmsnorm, store
-    // for(offset_start_h = threadIdx.x; offset_start_h < hidden_dim; offset_start_h += blockDim.x){
-    //     int offset = offset_start_s * stride_s + offset_start_h;
-    //     x = input[offset]; // TODO 当hidden_dim<1024时，只用load一次x
-    //     output[offset] = x * weight[offset_start_h%hidden_dim] * rsqrt(s_var/hidden_dim + eps);
-    // }
-    // // printf("offset: %d, weight: %f\n", offset, weight[offset_start_h]);
-    
+    // step 3: 计算rmsnorm
     auto vec_rmsnorm_op = [](
         vec_n_buf<scalar_t, vec_size> &vec_output,
         const vec_n_buf<scalar_t, vec_size> &vec_input,
         const vec_n_buf<scalar_t, vec_size> &vec_weight,
         float s_var, 
-        int hidden_dim, 
-        float eps
+        const int hidden_dim, 
+        const float eps
     ) {
-        for(int i = 0; i < vec_size; i++){
 #pragma unroll
+        for(int i = 0; i < vec_size; i++){
             vec_output.val[i] = vec_input.val[i] * vec_weight.val[i] * rsqrt(s_var/hidden_dim + eps);
-            // vec_output.val[i] = vec_input.val[i];
         }
     };
 
-    // 按一行数据一个block负责，然后重新分配给每个thread
-    using vec_n = vec_n_buf<scalar_t, vec_size>;
-    vec_n* vec_output = reinterpret_cast<vec_n*>(output + offset_start_s*stride_s); // 将当前block负责的所有元素都进行转换
-    const vec_n* vec_input = reinterpret_cast<const vec_n*>(input + offset_start_s*stride_s);
-    const vec_n* vec_weight = reinterpret_cast<const vec_n*>(weight);
-    vec_rmsnorm_op(
-        vec_output[offset_start_h], 
-        vec_input[offset_start_h], 
-        vec_weight[offset_start_h], 
-        s_var, hidden_dim, eps);
-    // output[] = vec_output[offset_vec]; // 不需要再转化，因为已经存到output中了
+    vec_rmsnorm<vec_size>(
+        output + offset_start_s*stride_s,
+        input + offset_start_s*stride_s,
+        weight,
+        s_var, hidden_dim, eps,
+        vec_rmsnorm_op
+    );
 }
 
 // 接口 && launch
@@ -152,7 +156,6 @@ void rmsnorm(
     torch::Tensor& weight,  // [hidden_dim]
     double eps
 ) {
-    // std::cout << "there is rmsnorm launch" << std::endl;
 
     // TODO: 确保input为行主序
 
@@ -163,16 +166,11 @@ void rmsnorm(
     int stride_s = input.stride(0);
     int stride_h = input.stride(1);
 
-    // std::cout << "seq_len: " << seq_len << std::endl;
-    // std::cout << "hidden_dim: " << hidden_dim << std::endl;
-    // std::cout << "stride_s: " << stride_s << std::endl;
-    // std::cout << "stride_h: " << stride_h << std::endl;
-
     // 划分数据
-    constexpr int vec_size = 1; // 模板参数的变量应该是编译期常量
+    constexpr int vec_size = 2; // 模板参数的变量应该是编译期常量
     dim3 grid(seq_len); //按行划分,每个block处理一行,行与行之间没有数据交互
     dim3 block(std::min(int(hidden_dim/vec_size), 1024)); // TODO 目前在+=x^2阶段，每个线程处理多个数据，存在部分thread处理0个数据的情况
-    int num_warp = std::min(32, (hidden_dim + 32 - 1) / 32);
+    int num_warp = std::min(32, (int(hidden_dim/vec_size) + 32 - 1) / 32);
     
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     using input_dtype = float;  // TODO 暂时写成float
