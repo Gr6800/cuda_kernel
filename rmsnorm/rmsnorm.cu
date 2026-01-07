@@ -11,9 +11,8 @@ struct __align__(size*sizeof(scalar_t)) vec_n_buf{   // __align要求1,2,4,8,16B
 template <int vec_size, typename scalar_t, typename VecOp>   // 类型模板参数可以由编译器推导，非类型的模型参数不能被推导
 __device__ inline void vec_xx(
         const scalar_t* input, // 每行的全局下标的地址
+        const int hidden_dim,
         VecOp vec_op){
-    // 每个thread处理vec个元素，目前每个thread仅处理1轮 TODO
-
     // 1 确认对齐
     static_assert(vec_size > 0 && (vec_size & (vec_size - 1)) == 0, 
                   "vec_size must be a power of 2");
@@ -25,11 +24,11 @@ __device__ inline void vec_xx(
     // 2 为每个线程分配数据
     using vec_n = vec_n_buf<scalar_t, vec_size>;    // 使用数据类型转换直接将1xf32变为sizexf32
     const vec_n* vec_input = reinterpret_cast<const vec_n*>(input); // reinterpret_cast不能去除const属性，要么统一都是const，要么都不是
-    int vec_offset = threadIdx.x; // 后续需要处理边界 TODO //申请dim3 block时已经考虑过为每个thread分配vec_size个数据
-    vec_n data = vec_input[vec_offset];
 
     // 3 应用vec_op
-    vec_op(data); // 数据类型转换后，可以通过下标来取数，一次取size个
+    for(int offset_start_h = threadIdx.x; offset_start_h < (hidden_dim/vec_size); offset_start_h += blockDim.x){
+        vec_op(vec_input[offset_start_h]);  // 后续需要处理边界 TODO 后续尝试采用double buffer
+    }
 }
 
 template <int vec_size, typename scalar_t, typename VecRmsnormOp>
@@ -43,32 +42,31 @@ __device__ void vec_rmsnorm(
     VecRmsnormOp vec_rmsnorm_op
 ){
     // 按一行数据一个block负责，然后重新分配给每个thread
+    // pack
     using vec_n = vec_n_buf<scalar_t, vec_size>;
     vec_n* vec_output = reinterpret_cast<vec_n*>(output); // 将当前block负责的所有元素都进行转换
     const vec_n* vec_input = reinterpret_cast<const vec_n*>(input);
     const vec_n* vec_weight = reinterpret_cast<const vec_n*>(weight);
-    int offset_start_h = threadIdx.x;
-    vec_rmsnorm_op(
+
+    // 为每个thread分配数据
+    for(int offset_start_h = threadIdx.x; offset_start_h < (hidden_dim/vec_size); offset_start_h += blockDim.x) {
+        vec_rmsnorm_op(
         vec_output[offset_start_h], 
         vec_input[offset_start_h], 
         vec_weight[offset_start_h], 
         s_var, hidden_dim, eps);
+    }
 }
 
 __device__ float reduce_in_warp(float val) {
-    // printf("init in warp, offset: %d, val: %f\n", blockIdx.x*32+threadIdx.x, val);
-    // int offset = 1;
-    // float n = __shfl_down_sync(0x000000ff, val, offset);
-    // printf("offset in warp: %d, offset: %d, n: %f\n", offset, blockIdx.x*32+threadIdx.x, n);
     for(int offset = 16; offset > 0; offset /= 2) {
-        // 传递变量val,向下(lane0方向)偏移offset个线程数.例如,lane0.val = lane0.val + lane16.val // TODO: 这理解对吗
+        // 传递变量val,向下(lane0方向)偏移offset个线程数
         // 以lane16(__shfl_down_sync中的val)为视角,lane16.val会被lane0.val获取
         // 所以__shfl_down_sync()返回的是高lane的val
         // 对于lane0来说,__shfl_down_sync()获得了lane16的val
         // 对于lane16来说，不存在lane32，获得的仍是lane16本身
         // mask不知道有什么用，不论怎么设置32个thread都参与
         val += __shfl_down_sync(0xffffffff, val, offset);
-        // printf("offset in warp: %d, offset: %d, val: %f\n", offset, blockIdx.x*32+threadIdx.x, val);
     }
     return val;
 }
@@ -100,7 +98,11 @@ __global__ void rmsnorm_kernel(
             variance += x * x;
         }
     };
-    vec_xx<vec_size>(input+offset_start_s*stride_s, vec_op);
+    vec_xx<vec_size>(
+        input+offset_start_s*stride_s, 
+        hidden_dim, 
+        vec_op
+    );
     // printf("offset: %d, variance: %f\n", offset_start_s*stride_s+offset_start_h, variance);
     
     // step 2.2: 归约
@@ -169,7 +171,7 @@ void rmsnorm(
     // 划分数据
     constexpr int vec_size = 2; // 模板参数的变量应该是编译期常量
     dim3 grid(seq_len); //按行划分,每个block处理一行,行与行之间没有数据交互
-    dim3 block(std::min(int(hidden_dim/vec_size), 1024)); // TODO 目前在+=x^2阶段，每个线程处理多个数据，存在部分thread处理0个数据的情况
+    dim3 block(std::min(int(hidden_dim/vec_size), 1024)); 
     int num_warp = std::min(32, (int(hidden_dim/vec_size) + 32 - 1) / 32);
     
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();

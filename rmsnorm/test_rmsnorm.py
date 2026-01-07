@@ -2,15 +2,15 @@ import torch
 import os
 import sys
 project_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append("/nfsmnt/guanrui012/github/hopper/cuda_kernel")
+sys.path.append(project_path)
 import cuda_ops
 
 from utils.utils import benchmark_kernel
 
 torch.manual_seed(0)
 # INPUT_ARGS = [[4096*24, 16*2**i] for i in range(10)] # 16, ..., 8192
-# INPUT_ARGS = [[4, 1024]]
-INPUT_ARGS = [[4096*24, 16*2**i] for i in range(8)] # 16, ..., 8192
+# INPUT_ARGS = [[4, 1024*4]]
+INPUT_ARGS = [[4096*24, 16*2**i] for i in range(11)] # 16, ..., 8192
 
 def rmsnorm_ref(hidden_states: torch.Tensor, weight: torch.Tensor, variance_epsilon: float):
     input_dtype = hidden_states.dtype
