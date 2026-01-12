@@ -2,12 +2,20 @@ from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import os
 
-compile_kernel_list = ["rmsnorm"]
+compile_kernel_list = [
+    # base
+    "shared_mem",
+
+    # transformer
+    "rmsnorm"
+]
 
 def get_source(compile_kernel_list):
     source_list = ["torch_bindings.cpp"]
     if "rmsnorm" in compile_kernel_list:
         source_list.append("rmsnorm/rmsnorm.cu")
+    if "shared_mem" in compile_kernel_list:
+        source_list.append("base/shared_memory/shared_mem.cu")
 
     return source_list
 
