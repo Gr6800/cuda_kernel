@@ -1,3 +1,7 @@
 build/
 *.so
 .codelink
+.vscode/
+__pycache__/
+*.ncu-rep
+*.log

@@ -5,9 +5,10 @@ import os
 compile_kernel_list = [
     # base
     "shared_mem",
+    "transpose",
 
     # transformer
-    "rmsnorm"
+    "rmsnorm",
 ]
 
 def get_source(compile_kernel_list):
@@ -16,6 +17,8 @@ def get_source(compile_kernel_list):
         source_list.append("rmsnorm/rmsnorm.cu")
     if "shared_mem" in compile_kernel_list:
         source_list.append("base/shared_memory/shared_mem.cu")
+    if "transpose" in compile_kernel_list:
+        source_list.append("base/shared_memory/transpose.cu")
 
     return source_list
 
