@@ -9,7 +9,8 @@ void transpose(
 );
 void global_mem(
     torch::Tensor &output,
-    torch::Tensor &input
+    torch::Tensor &input,
+    torch::Tensor &weight
 );
 
 // transformer
