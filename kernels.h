@@ -7,6 +7,10 @@ void transpose(
     torch::Tensor &output,
     torch::Tensor &input
 );
+void global_mem(
+    torch::Tensor &output,
+    torch::Tensor &input
+);
 
 // transformer
 void rmsnorm();
