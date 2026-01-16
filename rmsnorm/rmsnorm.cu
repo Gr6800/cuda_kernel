@@ -136,10 +136,16 @@ __global__ void rmsnorm_kernel(
         const int hidden_dim, 
         const float eps
     ) {
+        vec_n_buf<scalar_t, vec_size> tmp_output;
+        vec_n_buf<scalar_t, vec_size> tmp_input;
+        vec_n_buf<scalar_t, vec_size> tmp_weight;
+        tmp_input = vec_input;
+        tmp_weight = vec_weight;
 #pragma unroll
         for(int i = 0; i < vec_size; i++){
-            vec_output.val[i] = vec_input.val[i] * vec_weight.val[i] * rsqrt(s_var/hidden_dim + eps);
+            tmp_output.val[i] = tmp_input.val[i] * tmp_weight.val[i] * rsqrt(s_var/hidden_dim + eps);
         }
+        vec_output = tmp_output;
     };
 
     vec_rmsnorm<vec_size>(
@@ -169,7 +175,7 @@ void rmsnorm(
     int stride_h = input.stride(1);
 
     // 划分数据
-    constexpr int vec_size = 2; // 模板参数的变量应该是编译期常量
+    constexpr int vec_size = 4; // 模板参数的变量应该是编译期常量
     dim3 grid(seq_len); //按行划分,每个block处理一行,行与行之间没有数据交互
     dim3 block(std::min(int(hidden_dim/vec_size), 1024)); 
     int num_warp = std::min(32, (int(hidden_dim/vec_size) + 32 - 1) / 32);
