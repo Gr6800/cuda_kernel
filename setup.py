@@ -6,6 +6,7 @@ compile_kernel_list = [
     # base
     "shared_mem",
     "transpose",
+    "tma",
     "global_mem",
 
     # transformer
@@ -20,6 +21,8 @@ def get_source(compile_kernel_list):
         source_list.append("base/shared_memory/shared_mem.cu")
     if "transpose" in compile_kernel_list:
         source_list.append("base/shared_memory/transpose.cu")
+    if "tma" in compile_kernel_list:
+        source_list.append("base/shared_memory/tma.cu")
     if "global_mem" in compile_kernel_list:
         source_list.append("base/global_memory/global_mem.cu")
 
