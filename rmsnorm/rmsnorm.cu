@@ -1,6 +1,7 @@
 #include <iostream> // std::cout
 #include <ATen/cuda/CUDAContext.h> // cudaStream_t
 #include <torch/all.h> // torch::Tensor
+#include <cuda/barrier>
 
 // kernel
 template <typename scalar_t, int size> // TODO 后续可以在这里改成2维
@@ -10,20 +11,42 @@ struct __align__(size*sizeof(scalar_t)) vec_n_buf{   // __align要求1,2,4,8,16B
 
 template <int block_size_s, int vec_size, typename scalar_t, typename VecOp>   // 类型模板参数可以由编译器推导，非类型的模型参数不能被推导
 __device__ inline void vec_xx(
-        const scalar_t* input, // 每行的全局下标的地址
+        const scalar_t* input, // 每个block的全局下标的地址
+        float* s_input, // size: [block_size_s*blockDim.x*vec_size] TODO 支持hidden_dim=inf，此时buf有限，考虑优先按列计算应该更能利用shared mem
         const int hidden_dim,
         VecOp vec_op){
+    // TMA: global mem -> shared mem
+    using barrier = cuda::barrier<cuda::thread_scope_block>;
+    __shared__ barrier bar;
+
+    if(threadIdx.x == 0){
+        init(&bar, blockDim.x);
+        cuda::device::experimental::fence_proxy_async_shared_cta();
+    }
+    __syncthreads();
+
+    if(threadIdx.x == 0){
+        cuda::memcpy_async(
+            s_input,
+            input,
+            cuda::aligned_size_t<16>(block_size_s*blockDim.x*vec_size*sizeof(scalar_t)),
+            bar
+        );
+    }
+
+    barrier::arrival_token token = bar.arrive();
+    bar.wait(std::move(token));
+
     // 1 确认对齐
     static_assert(vec_size > 0 && (vec_size & (vec_size - 1)) == 0, 
                   "vec_size must be a power of 2");
     // uintptr_t addr_input = reinterpret_cast<uintptr_t>(input);
     // constexpr int vec_width = vec_size * sizeof(scalar_t); // 需要在编译期确认，因为scalar_t在编译期确定，所以需要定义为编译期常量。在函数外保证了input的数据类型与vec中的数据类型相同
     // bool is_align = ((addr_input & (vec_width - 1)) == 0);
-    // printf("is_align: %d\n", is_align);
 
     // 2 为每个线程分配数据
     using vec_n = vec_n_buf<scalar_t, vec_size>;    // 使用数据类型转换直接将1xf32变为sizexf32
-    const vec_n* vec_input = reinterpret_cast<const vec_n*>(input); // reinterpret_cast不能去除const属性，要么统一都是const，要么都不是
+    const vec_n* vec_input = reinterpret_cast<const vec_n*>(s_input); // reinterpret_cast不能去除const属性，要么统一都是const，要么都不是
 
     // 3 应用vec_op
     int num_vec = hidden_dim/vec_size; // 每行
@@ -94,13 +117,13 @@ __device__ void reduce_in_block(
         var = reduce_in_warp(var);
         // 2 将lane0的值写到shared memory
         if(lane_id == 0){
-            s_variance[ss* num_warp + warp_id] = var;
+            s_variance[ss*num_warp + warp_id] = var;
         }
         __syncthreads();
         // 3 在shared memory上归约
         if(warp_id == 0) {
             float sum = (lane_id < num_warp)? s_variance[ss* num_warp + lane_id] : 0;
-            s_variance[ss* num_warp + 0] = reduce_in_warp(sum);    // 将结果存在s_variance[0]中
+            s_variance[ss*num_warp + 0] = reduce_in_warp(sum);    // 将结果存在s_variance[0]中
         }
         __syncthreads();  
     }
@@ -122,8 +145,10 @@ __global__ void rmsnorm_kernel(
     
     float variance[block_size_s];   // size: [block_size_s]，每个thread负责block_size_s*vec，每行1个var buf
     for(int i = 0; i < block_size_s; i++) variance[i] = 0.0; // TODO 优化此处
-    extern __shared__ float s_variance[];   // size: [block_size_s*num_warp]，每个block负责block_size_s*hidden_dim，共block_size_s*num_warp个warp，每个warp一个s_var buf
-    
+    extern __shared__ float shared_mem[];   // size: [block_size_s*num_warp]，每个block负责block_size_s*hidden_dim，共block_size_s*num_warp个warp，每个warp一个s_var buf
+    // int offset_start_s_var = 0;
+    int offset_start_s_var = block_size_s*blockDim.x*vec_size;
+
     // step 2: 计算+=x*x，并归约
     // step 2.1: 向量化访存，先归约至每个线程的variance中
     auto vec_op = [&variance](const vec_n_buf<scalar_t, vec_size> &vec, int ss){
@@ -136,14 +161,16 @@ __global__ void rmsnorm_kernel(
     };
     vec_xx<block_size_s, vec_size>(
         input+offset_start_s*stride_s, 
+        &shared_mem[0],
         hidden_dim, 
         vec_op
     );
 
     int num_warp = min(32, (int(hidden_dim/vec_size) + 32 - 1) / 32);   // num_thread最大为1024，所以warp个数最大为32(32=1024/32)
-    reduce_in_block<block_size_s, vec_size>(variance, s_variance, hidden_dim, num_warp);
+    reduce_in_block<block_size_s, vec_size>(variance, &shared_mem[offset_start_s_var], hidden_dim, num_warp);
 
     __shared__ float s_var[block_size_s];   // size: [block_size_s]，每个block负责block_size_s*hidden_dim，每行一个s_var buf
+    float * s_variance = &shared_mem[offset_start_s_var];
     for(int i = 0; i < block_size_s; i++) s_var[i] = s_variance[i*num_warp];
 
     // step 3: 计算rmsnorm
@@ -171,7 +198,7 @@ __global__ void rmsnorm_kernel(
 
     vec_rmsnorm<block_size_s, vec_size>(
         output + offset_start_s*stride_s,
-        input + offset_start_s*stride_s,
+        &shared_mem[0],
         weight,
         s_var, hidden_dim, eps,
         vec_rmsnorm_op
@@ -197,14 +224,15 @@ void rmsnorm(
 
     // 划分数据
     constexpr int vec_size = 4; // 模板参数的变量应该是编译期常量
-    constexpr int block_size_s = 16;
+    constexpr int block_size_s = 2; // 为4时，可能L1 cache显存爆了
     dim3 grid(int(seq_len/block_size_s)); //按行划分,每个block处理block_size_s行，行与行之间在thread中串行
     dim3 block(std::min(int(hidden_dim/vec_size), 1024)); 
     int num_warp = std::min(32, (int(hidden_dim/vec_size) + 32 - 1) / 32);
     
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     using input_dtype = float;  // TODO 暂时写成float
-    rmsnorm_kernel<input_dtype, block_size_s, vec_size><<<grid, block, block_size_s*num_warp*sizeof(float), stream>>>(
+    rmsnorm_kernel<input_dtype, block_size_s, vec_size><<<grid, block, 
+                    (block_size_s*block.x*vec_size + block_size_s*num_warp)*sizeof(float), stream>>>(
         output.data_ptr<input_dtype>(),
         input_view.data_ptr<input_dtype>(),
         weight.data_ptr<input_dtype>(),

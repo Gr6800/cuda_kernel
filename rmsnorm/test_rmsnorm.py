@@ -10,7 +10,8 @@ from utils.utils import benchmark_kernel
 torch.manual_seed(0)
 # INPUT_ARGS = [[4096*24, 16*2**i] for i in range(10)] # 16, ..., 8192
 # INPUT_ARGS = [[32, 1024*4]]
-INPUT_ARGS = [[4096*24, 16*2**i] for i in range(11)] # 16, ..., 8192
+# INPUT_ARGS = [[4096*24, 16*2**i] for i in range(11)] # 16, ..., 16384
+INPUT_ARGS = [[4096*24, 16*2**i] for i in range(9)] # 16, ..., 4096
 
 def rmsnorm_ref(hidden_states: torch.Tensor, weight: torch.Tensor, variance_epsilon: float):
     input_dtype = hidden_states.dtype
@@ -21,7 +22,7 @@ def rmsnorm_ref(hidden_states: torch.Tensor, weight: torch.Tensor, variance_epsi
 
 def test_rmsnorm():
     B = 32 # batch
-    H = 1024 # hidden_dim
+    H = 1024*4 # hidden_dim
     input = torch.randn(B, H, device="cuda").to(torch.float32)
     # input = torch.ones(B, H, device="cuda").to(torch.float32)
     # input = torch.arange(H, device="cuda").to(torch.float32).repeat(B, 1)
