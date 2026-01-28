@@ -76,5 +76,5 @@ def test_rmsnorm_performance():
 
 if __name__ == "__main__":
     # test_rmsnorm()
-    # test_rmsnorm_accuracy()
-    test_rmsnorm_performance()
+    test_rmsnorm_accuracy()
+    # test_rmsnorm_performance()
